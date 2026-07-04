@@ -1,10 +1,9 @@
 # Mileway
 
 Internal operations app for a two-entity organization — a **501(c)(3) foundation** (primary)
-and an **operating LLC** beneath it. Mileway handles **manual mileage logging, vehicle records,
-and expense capture**, with consolidated and per-entity reporting plus an immutable audit trail.
-
-This repository is **Phase 1**. See [Scope](#phase-1-scope) and [Out of scope](#out-of-scope-phase-1).
+and an **operating LLC** beneath it. Mileway handles **mileage logging, vehicle and
+fleet-maintenance records, expense capture, saved locations, and a document/credential store**,
+with consolidated and per-entity reporting plus an immutable audit trail.
 
 ---
 
@@ -13,8 +12,8 @@ This repository is **Phase 1**. See [Scope](#phase-1-scope) and [Out of scope](#
 A **Vite + React + TypeScript single-page app** backed by **Supabase** (hosted Postgres, Auth,
 Storage). A pure client-side SPA builds to static assets, so the same build can later be wrapped
 by **Capacitor** into native iOS/Android with no rearchitecting. Supabase provides email + Google
-auth, receipt file storage, and **row-level security that enforces the three roles at the database
-layer** — defense-in-depth that matters for an auditor-facing app.
+auth, private file storage (receipts + documents), and **row-level security that enforces the five
+roles at the database layer** — defense-in-depth that matters for an auditor-facing app.
 
 | Concern | Choice |
 |---|---|
@@ -51,19 +50,25 @@ npm install
 
 ### 3. Apply the database schema
 
-Run the migrations in `supabase/migrations/` **in order** (`0001` → `0010`; the Phase 2 enum
-migration `0006` must run before `0007`). Either:
+Run the migrations in `supabase/migrations/` **in order, one at a time** (`0001` → `0010`).
+**Do not paste several files into a single SQL Editor run:** migration **`0006` adds the new role
+enum values and `0007` uses them**, and Postgres cannot add *and* use an enum value in the same
+transaction — so `0006` must commit before `0007` runs. Either:
 
-- **Supabase Dashboard → SQL Editor**: paste each file’s contents and run, in order; or
-- **Supabase CLI**:
+- **Supabase Dashboard → SQL Editor**: paste each file’s contents and run it, one file at a time,
+  in numeric order; or
+- **Supabase CLI** (applies each migration in order, each in its own transaction):
 
   ```bash
   supabase link --project-ref <your-ref>
   supabase db push
   ```
 
-The migrations create all tables, RLS policies, audit triggers, reporting views, the `receipts`
-storage bucket, and seed the two entities, default categories, and IRS rates.
+The migrations create every table (entities, vehicles, trips, expenses, saved locations,
+maintenance, documents, and their lookups), RLS policies, audit triggers, and reporting views;
+create the private **`receipts`** and **`documents`** storage buckets; and seed the two entities,
+IRS mileage rates, and the editable lookups (trip/expense categories, job titles, and
+location / maintenance / document types).
 
 ### 4. Configure auth providers
 
@@ -81,16 +86,21 @@ npm run build    # typecheck + production build to dist/
 npm run preview  # serve the production build
 ```
 
-> **First account = Administrator.** The first user to sign up is automatically made the
-> Administrator (bootstrap). Everyone after that defaults to **Staff**; promote them in
+> **First account = Owner.** The first user to sign up is automatically made the **Owner**
+> (bootstrap). Everyone after that defaults to **Contributor**; change roles in
 > **Settings → Users**.
 
 ---
 
-## Roles (permission tiers)
+## Roles & job titles
 
-Phase 2 splits identity into a **job title** (display/reporting only — nine titles seeded) and a
-**permission tier** (`role`) that actually governs access:
+Identity is split into two independent fields on each user:
+
+- **Job title** — display/reporting only, with **no bearing on permissions**. Nine titles are
+  seeded and the list is editable in **Settings → Job titles**: Super Administrator, Executive
+  Director, Administrator, Program Manager, Transportation Coordinator, Employee, Driver,
+  Read-Only Auditor, Accountant.
+- **Role (permission tier)** — governs access. Five tiers:
 
 | Tier | Access |
 |---|---|
@@ -98,111 +108,152 @@ Phase 2 splits identity into a **job title** (display/reporting only — nine ti
 | **Manager** | Read/write **all** operational data. No settings or user management. |
 | **Contributor** | Reads everything; creates records; edits/deletes **only the records they created**. |
 | **Accountant** | Reads everything (incl. audit log) and runs/exports reports. No operational edits. |
-| **Read-Only Auditor** | Read-only access to all records **and the audit log**. No writes. |
+| **Auditor** | Read-only access to all records **and the audit log**. No writes. |
 
 Enforcement is twofold: the UI hides actions a role can’t take, and **Postgres RLS policies**
 enforce the same rules at the database — the API rejects unauthorized writes regardless of the
-client. The first account to sign up bootstraps as **Owner**.
+client. The first account to sign up bootstraps as **Owner**; everyone after defaults to
+**Contributor**.
 
-> Upgrading from Phase 1: migration `0006` renames `administrator → owner` and `staff → contributor`
-> in place, so existing users keep their access automatically.
+---
+
+## Features
+
+### Trips & mileage
+Manual trip logging — date, vehicle, category, entity, and distance entered directly or computed
+from odometer start/end. Trip categories are editable and each maps to an `irs_rate_type`
+(business / medical / charitable / none); the date-effective rate is applied to compute an
+estimated deduction. Optional **start / end saved-location pickers** drive **auto-categorization**:
+choosing a saved location applies that location’s default trip category, and a manual category
+change clears the auto-categorized flag. Trips also carry GPS/location columns in the schema
+(start/end lat-lng, timestamps, route, saved-location references).
+
+### Vehicles
+VIN, plate, year/make/model, odometer, and insurance & registration with expiration dates.
+
+### Expenses
+Amount, date, category, entity, optional vehicle link, and an optional receipt image stored in the
+private `receipts` bucket (file only — **no OCR**).
+
+### Locations (geofences)
+Saved locations with coordinates, a radius, a location type, an optional owning entity
+(or shared across both), and a default trip category that powers auto-categorization. Location
+types are editable (seeded: Home, Group Home, Hospital, Pharmacy, County Office, Day Program,
+Employment Site, Vendor).
+
+### Fleet maintenance
+Service **records** (type, date, odometer, cost, vendor, optional link to an expense), per-vehicle
+**schedules** with mileage and/or month intervals, and a computed **due** view that flags what’s
+due or overdue using each vehicle’s current odometer (derived from trips) and last service.
+Maintenance types are editable (seeded: Oil Change, Tire Rotation, Brake Service, Repair,
+Inspection, Registration Renewal, Insurance Renewal).
+
+### Documents & driver credentials
+A central store for documents scoped to the **organization**, a **vehicle**, or a **person**, each
+with a type, issue/expiration dates, tags, and an uploaded file in the private `documents` bucket.
+**Personal (per-person) documents are visible only to the subject and to oversight roles**
+(owner / manager / accountant / auditor); organization and vehicle documents are visible to all
+authenticated users. Expiration tracking and a driver-credentials view surface upcoming and lapsed
+credentials. Document types are editable (seeded: Bylaws, IRS Determination Letter, Insurance
+Policy, Policy / Procedure, Vehicle Title, Registration Document, Insurance Card, Driver License,
+Insurance Verification, Background Check, Training / Safety Certificate, Other).
+
+### Dashboard
+Business miles (month + YTD), miles by entity, vehicle & fuel costs, and estimated IRS mileage
+deduction — plus a **Needs attention** panel surfacing maintenance due, upcoming vehicle
+insurance/registration expirations, and expiring documents (in-app only).
+
+### Settings (owner only)
+Entities, trip categories, expense categories, mileage rates, and the lookups — location types,
+maintenance types, document types, and job titles — plus **Users** (role and job title).
+
+### Audit
+Every insert/update/delete on every table is mirrored to an append-only `audit_log`, readable by
+owner, accountant, and auditor.
 
 ---
 
 ## Data model
 
 All tables carry immutable `created_at` / `created_by` and auto-maintained `updated_at` /
-`updated_by` (triggers in `0001_schema.sql`). Every change is mirrored into an append-only
+`updated_by` (triggers in `0001_schema.sql`), and every change is mirrored into an append-only
 `audit_log`.
+
+**Core**
 
 - **entities** — the two legal entities (Foundation = primary, Operating LLC). Every record
   references one.
-- **profiles** — users (1:1 with `auth.users`), carrying `role` and an optional default entity.
+- **profiles** — users (1:1 with `auth.users`), carrying `role`, optional `job_title_id`, and an
+  optional default entity.
 - **vehicles** — VIN, plate, year/make/model, odometer, insurance & registration (with expirations).
 - **trip_categories** — editable; each maps to an `irs_rate_type` (business/medical/charitable/none).
 - **expense_categories** — Fuel, Repairs, Maintenance, Parking, Tolls, Supplies (stable `key`).
-- **mileage_rates** — date-effective IRS rates per type; the rate effective on a trip’s date is applied.
-- **trips** — date, vehicle, category, entity, distance (entered or computed from odometer), notes.
+- **mileage_rates** — date-effective IRS rates per type; the rate effective on a trip’s date applies.
+- **trips** — date, vehicle, category, entity, distance (entered or from odometer), notes, plus
+  GPS/location fields (start/end lat-lng, timestamps, route, saved-location refs, `auto_categorized`).
 - **expenses** — amount, date, category, entity, optional vehicle, optional receipt file.
 - **audit_log** — immutable who/when/what (old & new JSON) for every insert/update/delete.
 
-Two `security_invoker` views (`v_trip_details`, `v_expense_details`) flatten joins and compute the
-per-trip applied rate + estimated deduction; they power the dashboard and reports while still
-respecting each user’s RLS.
+**Locations, maintenance & documents**
 
-**Phase 2 adds:** `job_titles`, `location_types`, `saved_locations`, `maintenance_types`,
-`maintenance_records`, `maintenance_schedules`, `document_types`, `documents` (+ a `documents`
-storage bucket), and additive GPS/location columns on `trips`. New views: `v_vehicle_odometer`,
-`v_maintenance_due`, `v_documents_expiring`, `v_driver_credentials`. Geofence helpers
-`earth_distance_m()` / `find_location_for_point()` support auto-categorization.
+- **job_titles** — editable job-title lookup (display/reporting only).
+- **location_types** / **saved_locations** — geofence lookup + saved locations (coords, radius,
+  default trip category; `entity_id` NULL = shared across both entities).
+- **maintenance_types** / **maintenance_records** / **maintenance_schedules** — service catalog,
+  service history, and per-vehicle interval schedules.
+- **document_types** / **documents** — document catalog + the document store (org/vehicle/person
+  scope, issue/expiration dates, tags, file).
+
+**Views** (all `security_invoker`, so each user’s RLS still applies)
+
+- **v_trip_details**, **v_expense_details** — flatten joins; `v_trip_details` also computes the
+  applied rate + estimated deduction.
+- **v_vehicle_odometer** — current odometer per vehicle, derived from trips.
+- **v_maintenance_due** — schedules joined to odometer + last service to flag due/overdue.
+- **v_documents_expiring** — documents with an expiration date, ordered by time remaining.
+- **v_driver_credentials** — per-person credential documents.
+
+Geofence helpers `earth_distance_m()` / `find_location_for_point()` support point-in-location
+lookups.
 
 ---
 
 ## Reports & export
 
-- **IRS-format mileage log**, **per-entity mileage summary**, **expense report** — filterable by
-  entity (single or consolidated) and date range.
+- **IRS-format mileage log**, **per-entity mileage summary**, **expense report**, and
+  **maintenance report** — filterable by entity (single or consolidated) and date range.
 - Export any report to **CSV**, or to **Excel**. The **Full workbook** export produces one `.xlsx`
-  with separate **Trips / Vehicles / Expenses** tabs.
+  with separate **Trips / Vehicles / Expenses / Maintenance** tabs.
 
 ---
 
-## Phase 2 (this release)
-
-Extends the Phase 1 schema (migrations `0006`–`0010`) — same conventions throughout.
-
-- **Five-tier permissions** (owner / manager / contributor / accountant / auditor) plus a separate,
-  editable **job title** lookup (nine titles).
-- **Saved locations (geofences)** with destination recognition; **auto-categorization** — picking a
-  saved location on a trip applies its default category (a manual category override clears it).
-  Trips also carry GPS fields (lat/lng, timestamps, route) ready for the native app.
-- **Fleet maintenance** — service history, schedules (mileage and/or time intervals), and a computed
-  **what's-due** view based on each vehicle's odometer (derived from trips) and last service.
-- **Documents & driver credentials** — one store for organization, vehicle, and per-person
-  documents (license, insurance verification, background check, training certs) in a private
-  `documents` bucket, with **expiration tracking** and a driver-credentials view. Sensitive
-  per-person documents are visible only to the subject and oversight roles.
-- **Dashboard "Needs attention"** — maintenance due, vehicle insurance/registration, and expiring
-  documents at a glance. **Maintenance** added to reports + the Excel workbook.
-
-## Phase 1 scope
-
-- Two entities; every record assignable to one; reporting single-entity **and** consolidated.
-- Auth: email + Google; three roles (Administrator, Staff, Read-Only Auditor).
-- Manual trip/mileage logging (no GPS) with editable categories.
-- Vehicle records with insurance/registration expirations.
-- Expense capture with optional receipt image upload (file stored, **no OCR**).
-- Consolidated dashboard: business miles (month + YTD), miles by entity, vehicle & fuel costs,
-  estimated IRS mileage deduction.
-- Reports + CSV/Excel export.
-- Immutable created/edited timestamps + a dedicated audit log on every record.
-
-### Decisions & assumptions to confirm
+## Decisions & assumptions to confirm
 
 - **IRS rates** are seeded as editable, date-effective defaults. Charitable is statutory (14¢);
   the **2026 business/medical rows are placeholders** copied from 2025 — verify against current IRS
   guidance in **Settings → Mileage rates**.
 - **Category → rate-type mapping** (e.g. Pharmacy → medical, Fundraising → charitable) is a sensible
-  default; confirm classifications with your tax advisor and adjust in **Settings → Trip categories**.
-- **Staff read everything** (shared operational picture) but write only their own records.
+  default; confirm classifications with your tax advisor in **Settings → Trip categories**.
+- **Contributors read everything** (shared operational picture) but write only their own records.
 - **Expense → vehicle is optional** (covers non-vehicle costs like general supplies).
 - Entity **legal names / EINs** are placeholders — set them in **Settings → Entities**.
 
-## Out of scope (still upcoming)
+---
 
-- **Native GPS capture** — the schema and trip fields are ready, but automatic trip recording,
-  live route polylines, and on-device geofencing require the Capacitor native app (not yet packaged).
-- **Automated reminders/notifications** — expirations and maintenance-due are *surfaced* in-app
-  (dashboard, badges), but no emails/push are sent.
-- Residents/appointments/funding-source tracking; OCR; accounting, payroll, or banking integrations;
-  incident reporting.
+## Not yet built
+
+Native GPS capture / automatic trip recording (the schema carries GPS + geofence fields and a
+`find_location_for_point()` helper, but today distance is entered manually and categories are
+applied via location selection); automated email/push reminders (expirations and due items are
+surfaced in-app only); and a residents / appointments / funding module. No OCR; no
+accounting / payroll / banking integrations.
 
 ---
 
 ## Project layout
 
 ```
-supabase/migrations/   SQL: schema, RLS, views, seed, storage
+supabase/migrations/   SQL: schema, RLS, views, seed, storage (0001–0010)
 src/
   lib/                 supabase client, utils, metrics, export (csv/excel/reports)
   contexts/            AuthContext (session + profile + role)
@@ -210,11 +261,13 @@ src/
   components/
     ui/                primitives (button, input, modal, …)
     common/            DataTable, EntityFilter, StatCard, …
-    forms/             TripForm, VehicleForm, ExpenseForm
-    settings/          admin settings sections
+    forms/             Trip, Vehicle, Expense, SavedLocation, MaintenanceRecord,
+                       MaintenanceSchedule, Document
+    settings/          admin settings sections (entities, categories, rates, lookups, users)
     layout/            AppLayout (sidebar + topbar)
     auth/              route guards
-  pages/               Dashboard, Trips, Vehicles, Expenses, Reports, Audit, Settings, Login
+  pages/               Dashboard, Trips, Vehicles, Maintenance, Expenses, Locations,
+                       Documents, Reports, Audit, Settings, Login
 ```
 
 > `npm run db:types` regenerates `src/types/supabase.ts` from a linked Supabase project
