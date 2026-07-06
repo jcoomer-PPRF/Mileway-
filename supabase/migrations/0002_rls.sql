@@ -84,7 +84,9 @@ create policy mileage_rates_admin_write on public.mileage_rates
 
 -- ---------------------------------------------------------------------------
 -- Operational records: read all; create if staff/admin; edit/delete own or admin.
--- (created_by is forced to auth.uid() by tg_set_audit_fields, so it can't be forged.)
+-- (created_by is set by tg_set_audit_fields. NOTE: as originally written the
+-- trigger kept a client-supplied created_by — forgeable; 0011 flips the
+-- coalesce so authenticated inserts cannot supply one.)
 -- ---------------------------------------------------------------------------
 create policy vehicles_select on public.vehicles
   for select to authenticated using (true);
