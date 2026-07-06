@@ -77,7 +77,7 @@ export function DocumentForm({
     setBusy(true);
     try {
       let path = receiptPath;
-      if (file) path = await uploadDocumentFile(file, entityId);
+      if (file) path = await uploadDocumentFile(file, entityId, scope === 'driver' ? profileId : null);
 
       await onSubmit({
         entity_id: entityId,

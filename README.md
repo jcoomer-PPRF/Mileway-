@@ -50,7 +50,7 @@ npm install
 
 ### 3. Apply the database schema
 
-Run the migrations in `supabase/migrations/` **in order, one at a time** (`0001` → `0010`).
+Run the migrations in `supabase/migrations/` **in order, one at a time** (`0001` → `0011`).
 **Do not paste several files into a single SQL Editor run:** migration **`0006` adds the new role
 enum values and `0007` uses them**, and Postgres cannot add *and* use an enum value in the same
 transaction — so `0006` must commit before `0007` runs. Either:
@@ -78,7 +78,20 @@ location / maintenance / document types).
   and add your app origin (e.g. `http://localhost:5173`) to **Authentication → URL Configuration →
   Redirect URLs**.
 
-### 5. Run
+### 5. Deploy the deactivation function
+
+Account deactivation runs through a small Edge Function — the app's only service-role
+path. It flips `profiles.is_active` as the calling owner (the database proves owner-ness)
+and bans/unbans the Supabase Auth account so a deactivated user cannot sign in at all.
+
+```bash
+supabase link --project-ref <your-ref>   # if not already linked
+supabase functions deploy set-user-active
+```
+
+Without it, the Status field in **Settings → Users** errors on save; everything else works.
+
+### 6. Run
 
 ```bash
 npm run dev      # http://localhost:5173
@@ -114,6 +127,18 @@ Enforcement is twofold: the UI hides actions a role can’t take, and **Postgres
 enforce the same rules at the database — the API rejects unauthorized writes regardless of the
 client. The first account to sign up bootstraps as **Owner**; everyone after defaults to
 **Contributor**.
+
+Hardening rules (migration `0011`) that apply across all tiers:
+
+- `created_by` / `created_at` are **server-set** — an authenticated insert cannot supply them.
+- The own-record edit rule requires a **current** write-tier role: a user moved to Auditor or
+  Accountant loses edit/delete on records they created earlier.
+- **Deactivation is real.** An owner deactivating an account (Settings → Users) blocks
+  sign-in at the Auth layer (via the `set-user-active` Edge Function) and, for any
+  still-valid token, every read and write at the database. Deactivated users see a
+  deactivated-account message, cannot reactivate themselves, and only an owner can restore
+  them. The last active owner can never be demoted or deactivated.
+- Enforcement is verified by an executable test suite in `supabase/tests/` (60 checks).
 
 ---
 
@@ -153,7 +178,9 @@ A central store for documents scoped to the **organization**, a **vehicle**, or 
 with a type, issue/expiration dates, tags, and an uploaded file in the private `documents` bucket.
 **Personal (per-person) documents are visible only to the subject and to oversight roles**
 (owner / manager / accountant / auditor); organization and vehicle documents are visible to all
-authenticated users. Expiration tracking and a driver-credentials view surface upcoming and lapsed
+authenticated users. This holds for the **files as well as the rows**: person-scoped files are
+stored under a `personal/<profile_id>/…` path and the storage policies gate reads on that prefix,
+so a non-oversight user cannot list or sign a URL for another person's credential file. Expiration tracking and a driver-credentials view surface upcoming and lapsed
 credentials. Document types are editable (seeded: Bylaws, IRS Determination Letter, Insurance
 Policy, Policy / Procedure, Vehicle Title, Registration Document, Insurance Card, Driver License,
 Insurance Verification, Background Check, Training / Safety Certificate, Other).
@@ -253,7 +280,9 @@ accounting / payroll / banking integrations.
 ## Project layout
 
 ```
-supabase/migrations/   SQL: schema, RLS, views, seed, storage (0001–0010)
+supabase/migrations/   SQL: schema, RLS, views, seed, storage, hardening (0001–0011)
+supabase/functions/    Edge Functions: set-user-active (deactivation + Auth ban)
+supabase/tests/        executable RLS verification suite (shim, fixtures, role matrix)
 src/
   lib/                 supabase client, utils, metrics, export (csv/excel/reports)
   contexts/            AuthContext (session + profile + role)

@@ -30,14 +30,36 @@ export function useUserMutations() {
       input,
     }: {
       id: string;
-      input: Partial<Pick<Profile, 'role' | 'is_active' | 'default_entity_id' | 'full_name' | 'job_title_id'>>;
+      input: Partial<Pick<Profile, 'role' | 'default_entity_id' | 'full_name' | 'job_title_id'>>;
     }) => {
       const { error } = await supabase.from('profiles').update(input).eq('id', id);
       if (error) throw error;
     },
     onSuccess: invalidate,
   });
-  return { update };
+  // Activation goes through the set-user-active Edge Function, which flips
+  // is_active as the calling owner AND bans/unbans the Supabase Auth account,
+  // so a deactivated user cannot log in at all — not just read nothing.
+  const setActive = useMutation({
+    mutationFn: async ({ id, active }: { id: string; active: boolean }) => {
+      const { data, error } = await supabase.functions.invoke('set-user-active', {
+        body: { user_id: id, active },
+      });
+      if (error) {
+        let message = error.message;
+        try {
+          const body = await (error as { context?: Response }).context?.json();
+          if (body?.error) message = body.error;
+        } catch {
+          // keep the default message
+        }
+        throw new Error(message);
+      }
+      if (data?.error) throw new Error(data.error);
+    },
+    onSuccess: invalidate,
+  });
+  return { update, setActive };
 }
 
 export const ALL_ROLES: UserRole[] = ['owner', 'manager', 'contributor', 'accountant', 'auditor'];

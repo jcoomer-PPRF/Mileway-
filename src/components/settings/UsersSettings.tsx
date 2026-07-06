@@ -19,7 +19,7 @@ export function UsersSettings() {
   const { data: users, isLoading } = useUsers();
   const { data: entities } = useEntities();
   const { data: jobTitles } = useJobTitles();
-  const { update } = useUserMutations();
+  const { update, setActive } = useUserMutations();
   const [editing, setEditing] = useState<Profile | null>(null);
 
   const entityName = (id: string | null) => (id ? entities?.find((e) => e.id === id)?.name ?? '—' : '—');
@@ -63,7 +63,8 @@ export function UsersSettings() {
       </table>
 
       <p className="px-4 py-3 text-xs text-slate-400">
-        New accounts default to Staff. Roles, status, and default entity are managed here.
+        New accounts default to Contributor. Deactivating an account blocks sign-in and all data
+        access until an owner reactivates it.
       </p>
 
       {editing && (
@@ -71,7 +72,12 @@ export function UsersSettings() {
           user={editing}
           isSelf={editing.id === me?.id}
           onClose={() => setEditing(null)}
-          onSave={(input) => update.mutateAsync({ id: editing.id, input })}
+          onSave={async ({ is_active, ...fields }) => {
+            await update.mutateAsync({ id: editing.id, input: fields });
+            if (is_active !== undefined && is_active !== editing.is_active) {
+              await setActive.mutateAsync({ id: editing.id, active: is_active });
+            }
+          }}
         />
       )}
     </Card>

@@ -14,6 +14,8 @@ interface AuthState {
   session: Session | null;
   profile: Profile | null;
   loading: boolean;
+  /** True when the last session belonged to a deactivated account (we signed it out). */
+  deactivated: boolean;
   role: UserRole | null;
   isOwner: boolean; // full access incl. settings + user management
   canEditAll: boolean; // owner or manager — edit any operational record
@@ -38,12 +40,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [deactivated, setDeactivated] = useState(false);
 
   async function loadProfile(userId: string) {
     const { data, error } = await supabase.from('profiles').select('*').eq('id', userId).maybeSingle();
     if (error) {
       console.error('Failed to load profile', error);
       setProfile(null);
+      return;
+    }
+    // A deactivated account must not reach the app, even with a still-valid
+    // session. RLS already blocks its data access; this signs it out and
+    // routes it to the deactivated-account message on the login screen.
+    if (data && data.is_active === false) {
+      setProfile(null);
+      setDeactivated(true);
+      await supabase.auth.signOut();
       return;
     }
     setProfile(data as Profile | null);
@@ -84,6 +96,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       session,
       profile,
       loading,
+      deactivated,
       role: profile?.role ?? null,
       isOwner: profile?.role === 'owner',
       canEditAll: profile?.role === 'owner' || profile?.role === 'manager',
@@ -97,10 +110,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isAuditor: profile?.role === 'auditor',
       isAccountant: profile?.role === 'accountant',
       async signInWithEmail(email, password) {
+        setDeactivated(false);
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         return { error: error?.message ?? null };
       },
       async signUpWithEmail(email, password, fullName) {
+        setDeactivated(false);
         const { data, error } = await supabase.auth.signUp({
           email,
           password,
@@ -112,6 +127,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         };
       },
       async signInWithGoogle() {
+        setDeactivated(false);
         const { error } = await supabase.auth.signInWithOAuth({
           provider: 'google',
           options: { redirectTo: window.location.origin },
@@ -125,7 +141,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (session?.user) await loadProfile(session.user.id);
       },
     }),
-    [session, profile, loading],
+    [session, profile, loading, deactivated],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

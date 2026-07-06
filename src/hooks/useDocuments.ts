@@ -29,10 +29,20 @@ export interface DocumentInput {
   notes: string | null;
 }
 
-/** Uploads a file to the private `documents` bucket and returns its path. */
-export async function uploadDocumentFile(file: File, entityId: string): Promise<string> {
+/**
+ * Uploads a file to the private `documents` bucket and returns its path.
+ * Person-scoped files go under personal/<profile_id>/ — the storage policies
+ * gate reads on that prefix (subject or oversight roles). Everything else is
+ * entity-prefixed and readable by all active users.
+ */
+export async function uploadDocumentFile(
+  file: File,
+  entityId: string,
+  profileId?: string | null,
+): Promise<string> {
   const ext = file.name.includes('.') ? file.name.split('.').pop() : 'bin';
-  const path = `${entityId}/${crypto.randomUUID()}.${ext}`;
+  const prefix = profileId ? `personal/${profileId}` : entityId;
+  const path = `${prefix}/${crypto.randomUUID()}.${ext}`;
   const { error } = await supabase.storage.from('documents').upload(path, file, {
     cacheControl: '3600',
     upsert: false,

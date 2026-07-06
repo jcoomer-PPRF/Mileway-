@@ -11,7 +11,7 @@ import { Spinner } from '@/components/ui/spinner';
 type Mode = 'signin' | 'signup';
 
 export function LoginPage() {
-  const { session, signInWithEmail, signUpWithEmail, signInWithGoogle } = useAuth();
+  const { session, deactivated, signInWithEmail, signUpWithEmail, signInWithGoogle } = useAuth();
   const [mode, setMode] = useState<Mode>('signin');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
@@ -59,6 +59,13 @@ export function LoginPage() {
         </div>
 
         <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+          {deactivated && (
+            <div className="mb-4 flex items-start gap-2 rounded-md bg-red-50 p-3 text-sm text-red-800">
+              <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>This account has been deactivated. Contact an administrator if you believe this is an error.</span>
+            </div>
+          )}
+
           {!isSupabaseConfigured && (
             <div className="mb-4 flex items-start gap-2 rounded-md bg-amber-50 p-3 text-sm text-amber-800">
               <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
