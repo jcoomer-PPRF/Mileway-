@@ -182,7 +182,7 @@ All are editable in-app; none block Phase 3, but confirm before treating any as 
 1. **2026 business/medical IRS rates are placeholders** copied from 2025. Charitable 14¢ is statutory. Verify in Settings → Mileage rates.
 2. **Category → rate-type mapping** (e.g., Pharmacy → medical, Fundraising → charitable). Confirm with Jeff's tax advisor.
 3. **Entity legal names / EINs are placeholders.** Set in Settings → Entities.
-4. **Expiration look-ahead = 60 days** (`EXPIRATION_WINDOW_DAYS` constant) for the dashboard and Documents "expiring" surfaces. Recommended change: make it configurable **per document type** in Settings, not one global number — a driver's license renewal and a vehicle registration warrant different lead times.
+4. **Expiration look-ahead = 60 days** (`EXPIRATION_WINDOW_DAYS` constant) for the dashboard and Documents "expiring" surfaces. **Phase 3 (reminders) replaces this constant with configurable per-type lead times** — so it gets resolved there, not as a separate task. A driver's license renewal and a vehicle registration warrant different lead times.
 5. **Web auto-categorization** fires on saved-location pick only; GPS geofencing waits for native.
 6. **Audit-log read** = `owner` / `accountant` / `auditor`.
 
@@ -192,9 +192,9 @@ All are editable in-app; none block Phase 3, but confirm before treating any as 
 
 In recommended order:
 
-1. **Verify + merge** (section 7). Immediate, blocking.
-2. **Native GPS capture** via Capacitor packaging: background location, geofence-by-GPS auto-categorization, push notifications. The trip GPS columns already exist for this.
-3. **Automated reminders** (email/push): maintenance due, registration and insurance renewals, document expirations. The computing views already exist; this adds the delivery layer.
+1. **Verify** (section 7): apply migrations on a throwaway Supabase, read `0006`/`0007`, run the role test. Blocking — do before Phase 3. (Branch housekeeping and README are done.)
+2. **Automated reminders (email) — the active Phase 3.** Selected direction. Turn the existing due/expiring signals (`v_maintenance_due`, `v_documents_expiring`, `v_driver_credentials`, vehicle expiration fields) into a scheduled digest email via a server-side job (e.g., Supabase Edge Function on a schedule + an email provider). Adds a delivery layer on top of what already computes. Two settled design calls: a single digest (not one email per item), and minimal detail in the body (category + link back into the app, never a named person's credential or document contents in plaintext — the in-app access gates must hold). Replace the hardcoded `EXPIRATION_WINDOW_DAYS` with configurable per-type lead times. The scheduled job runs with elevated privilege (service role, bypassing RLS) — isolate that path and keep the service role off the client.
+3. **Native GPS capture** via Capacitor packaging: background location, geofence-by-GPS auto-categorization, push notifications. The trip GPS columns and the `find_location_for_point()` helper already exist for this. Deferred behind reminders — bigger lift (native build/deploy, background-location permissions) and a longer maintenance tail.
 4. **Accounting / payroll / banking integrations** (e.g., QuickBooks, Xero). Currently a deliberate exclusion; lift only when Jeff decides.
 5. **Incident reporting.**
 6. **OCR** for receipts and documents (storage exists; add extraction).
@@ -266,5 +266,5 @@ src/
 1. Read `README.md` and migrations `0001`–`0010` in the repo. Treat them as source of truth; reconcile any drift against this document.
 2. Confirm the branch state in section 6 — everything is on a single `main`; no merges are pending.
 3. Stand up a throwaway Supabase, apply migrations `0001`–`0010` in order one at a time, and sign in as each of the five tiers to confirm access enforces at the database (section 7). Fix any RLS or enum-ordering issue before anything new.
-4. Pick the next roadmap item — native GPS/Capacitor or automated reminders is the logical next build. **Not residents.**
+4. The next phase is **automated reminders (email)** — the chosen Phase 3 (section 10). A scheduled digest built on the existing due/expiring views, with minimal detail in the body. **Not residents.**
 5. Hold the conventions in section 8 and the method in section 12. Schema first, human approves, one PR per phase.
