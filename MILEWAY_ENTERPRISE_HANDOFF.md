@@ -4,7 +4,7 @@
 **From:** the planning thread that scoped and reviewed Phases 1 and 2.
 **Read this first, then read the repo.** This document is the intent, the current state, and the guardrails. The migration files and `README.md` in the repository are the source of truth for exact table names, column types, and code. Where the two disagree, the repo wins — and this document is wrong and should be corrected.
 
-> **Accuracy status:** reconciled against the actual `README.md` on `main` (the merged Phase 1 + Phase 2 document), including the view and function names. The migration SQL itself has not been read line-by-line — for exact columns and RLS predicates, read the migration files before building on them.
+> **Accuracy status:** reconciled against the actual `README.md` on `main` (the merged Phase 1 + Phase 2 document), including the view and function names. The migrations and RLS have since been verified against a live database — see section 7 for what that found (four gaps, now being fixed in the `0011` hardening). The `0002_rls.sql:87` comment claiming `created_by` "can't be forged" is known-wrong; the code wins until `0011` fixes it.
 
 ---
 
@@ -124,7 +124,7 @@ Migration mapping (preserves existing access): `administrator` → `owner` (rena
   - Org doc = `vehicle_id` and `profile_id` both null. Vehicle doc = `vehicle_id` set. Driver-credential doc = `profile_id` set. No polymorphic owner table.
 - Private `documents` storage bucket, parallel to `receipts`.
 - `v_documents_expiring` view (documents with an expiration date, by time remaining) and `v_driver_credentials` view (per-person credential documents).
-- Personal (per-person) documents are visible only to the subject and to oversight roles (`owner` / `manager` / `accountant` / `auditor`); organization and vehicle documents are visible to all authenticated users.
+- Personal (per-person) documents are visible only to the subject and to oversight roles (`owner` / `manager` / `accountant` / `auditor`); organization and vehicle documents are visible to all authenticated users. **Caveat (until `0011` lands): this holds at the row level only — the `documents` storage bucket itself is readable by any authenticated user, so the files leak even though the rows are gated. See section 7, finding 1.**
 - **Vehicle insurance/registration expiration stays on `vehicles` as the source of truth.** A document may attach the PDF, but the expiration date is not copied into `documents`, and `v_documents_expiring` does not double-count it.
 
 ### Dashboard, reports, settings
@@ -145,16 +145,27 @@ No PR was opened for the merge; the fast-forward produced the same tree a PR wou
 
 ---
 
-## 7. Do this first — before any new feature
+## 7. Current gate — verification is DONE; the 0011 hardening is the active task before Phase 3
 
-The code is merged, but none of it has touched a database yet, and the merge skipped the diff review. Close both gaps before building anything new.
+**Read this before proposing any next step. Verification is complete. Do not re-run it or jump to Phase 3.** A fresh session that skips this section will wrongly conclude the review is still pending and drift straight to Phase 3 — which is the one wrong move here, because Phase 3 sits behind the hardening below.
 
-1. **Apply the migrations to Supabase — the real gate.** Everything so far is verified by `tsc` and review of the *plan*, not the generated SQL, and the SQL has never run. Apply `0001` → `0010` **in order**, on a throwaway/staging project first — not one you care about.
-   - **Enum-ordering hazard:** `0006` must commit the new role enum values before `0007` uses them. Postgres will not add an enum value and use it in the same transaction. Apply each migration file as its own step — in the Supabase SQL Editor, run them one file at a time, not all pasted together — so `0006` commits before `0007` runs.
-   - **Role migration converts existing user records.** After applying, sign in as each of the five tiers and confirm an existing user kept the access they had. This is the only change in the build that can silently strip access.
-2. **Do the review the fast-forward merge skipped.** No PR diff was ever looked at. Read `0006` and `0007` (the role/RLS migration) against the code before trusting them in any environment with real data. This is the single riskiest file in the build.
-3. **README** — rewritten to match Phase 2 and reconciled against the file on `main`. Done. The branch rename to `main` and the redundant-branch deletion are also done.
-4. Only after the schema is applied, verified, and reviewed, start the next roadmap item.
+**What was verified (done, by the Fable session):** all 10 migrations applied cleanly against a real Postgres 17 with a shimmed Supabase environment, each migration in its own transaction. The enum-ordering hazard is confirmed real (concatenating `0006`+`0007` fails with "unsafe use of new value manager"). Schema check passed — 17 tables, 6 views, both private buckets, all seed counts correct, RLS enabled on every public table. The full five-tier role matrix passed at the database, including the key case: a contributor's UPDATE/DELETE against a manager-created record touches 0 rows (refused). A throwaway *cloud* Supabase run is still worth doing later — it exercises real Auth + Storage, which the shim only approximates — but it is not blocking.
+
+> Note for any manual re-test: an RLS refusal on UPDATE/DELETE looks like "0 rows affected," not an error. Check row counts, not error messages.
+
+**Four gaps the verification found — none visible to app-level clicking, all real. Fixed by the `0011` hardening (in progress on its own branch):**
+
+1. **Personal document *files* are not protected at the storage layer — most serious.** Document *rows* are gated, but the `documents` bucket is readable by any authenticated user, so a contributor can list and sign URLs for another person's credential files (e.g., a background check). This contradicts the README's promise that personal documents are visible only to subject + oversight roles — true at the row level, false at the file level. Fix: store personal (profile-scoped) docs under a `<profile_id>/…` path prefix and scope the bucket read policy to that prefix; includes an upload-path app change. Highest priority because Phase 3 reminders link people back to exactly these files, and the bucket is still empty (cheapest to fix pre-launch).
+
+2. **`created_by` is forgeable on insert.** `tg_set_audit_fields` uses `coalesce(new.created_by, auth.uid())`, so a supplied value wins — a contributor can stamp a trip as created by someone else, corrupting the IRS mileage log's attribution. The `audit_log` still records the true actor. The comment at `0002_rls.sql:87` claiming it "can't be forged" is wrong (a real doc/code disagreement). Fix: flip to `coalesce(auth.uid(), new.created_by)`.
+
+3. **Demoted users keep edit rights on their old records.** The own-record edit/delete arm has no write-tier guard, so a user demoted to auditor/accountant can still edit/delete everything they created before demotion. Fix: add a `can_write()` conjunct to the own-record arm.
+
+4. **`is_active` is enforced by nothing.** "Deactivate" currently changes a badge only — a deactivated user keeps full write access and can flip themselves back on. **Decision made:** deactivated means no reads, no writes, cannot self-reactivate, and cannot access the system at all. Fix spans layers: fold `is_active` into the RLS helper functions (blocks read + write even with a valid token), trigger-protect `is_active` from self-edit (owner-only), sign out deactivated users in the app, and disable the Supabase Auth login on deactivation. Implement deactivate/reactivate as a single owner-only **service-role** action — the app's first server-side privileged path, isolated, never in the client.
+
+**Also confirmed, leave as-is (called out, not bugs):** `saved_locations` / `maintenance_schedules` are owner/manager-write-only (fleet config vs. operational data — intended, keep); the `receipts` bucket is all-authenticated-readable (matches Phase 1 design, but carries financial detail — a conscious keep).
+
+**The gate:** finish `0011` (schema-first, reviewed, applied, verification suite re-run green, merged) **before** Phase 3 reminders. The Fable session's verification scripts (shim, fixtures, matrix) should be committed to a branch as a reusable RLS regression suite. Once `0011` merges, reconcile the docs: the README's personal-document promise finally becomes true, and the `0002_rls.sql:87` comment is corrected.
 
 ---
 
@@ -192,7 +203,7 @@ All are editable in-app; none block Phase 3, but confirm before treating any as 
 
 In recommended order:
 
-1. **Verify** (section 7): apply migrations on a throwaway Supabase, read `0006`/`0007`, run the role test. Blocking — do before Phase 3. (Branch housekeeping and README are done.)
+1. **Verification — DONE.** The migrations, RLS, and five-tier matrix are verified against a live database (section 7). It surfaced four gaps now being fixed in the **`0011` hardening** (storage file scoping, forgeable `created_by`, demoted-user edit rights, `is_active` deactivation). `0011` is the blocking gate — finish and merge it before Phase 3. A throwaway cloud-Supabase run is still worth doing but is not blocking.
 2. **Automated reminders (email) — the active Phase 3.** Selected direction. Turn the existing due/expiring signals (`v_maintenance_due`, `v_documents_expiring`, `v_driver_credentials`, vehicle expiration fields) into a scheduled digest email via a server-side job (e.g., Supabase Edge Function on a schedule + an email provider). Adds a delivery layer on top of what already computes. Two settled design calls: a single digest (not one email per item), and minimal detail in the body (category + link back into the app, never a named person's credential or document contents in plaintext — the in-app access gates must hold). Replace the hardcoded `EXPIRATION_WINDOW_DAYS` with configurable per-type lead times. The scheduled job runs with elevated privilege (service role, bypassing RLS) — isolate that path and keep the service role off the client.
 3. **Native GPS capture** via Capacitor packaging: background location, geofence-by-GPS auto-categorization, push notifications. The trip GPS columns and the `find_location_for_point()` helper already exist for this. Deferred behind reminders — bigger lift (native build/deploy, background-location permissions) and a longer maintenance tail.
 4. **Accounting / payroll / banking integrations** (e.g., QuickBooks, Xero). Currently a deliberate exclusion; lift only when Jeff decides.
@@ -265,6 +276,6 @@ src/
 
 1. Read `README.md` and migrations `0001`–`0010` in the repo. Treat them as source of truth; reconcile any drift against this document.
 2. Confirm the branch state in section 6 — everything is on a single `main`; no merges are pending.
-3. Stand up a throwaway Supabase, apply migrations `0001`–`0010` in order one at a time, and sign in as each of the five tiers to confirm access enforces at the database (section 7). Fix any RLS or enum-ordering issue before anything new.
+3. Verification is done (section 7); the active task is the **`0011` hardening** branch that fixes the four findings. Don't re-run verification or jump to Phase 3. A throwaway cloud-Supabase run to exercise real Auth/Storage is still worth doing but isn't blocking.
 4. The next phase is **automated reminders (email)** — the chosen Phase 3 (section 10). A scheduled digest built on the existing due/expiring views, with minimal detail in the body. **Not residents.**
 5. Hold the conventions in section 8 and the method in section 12. Schema first, human approves, one PR per phase.
